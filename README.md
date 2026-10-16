@@ -122,4 +122,12 @@ SEQC2 Oncopanel Sequencing Working Group data set: Gong B, et al. *Scientific Da
 
 ## About
 
+**Alperen Korkmaz**  
+*Undergraduate Student | BSc Biology , Gazi University*
+
 I am a final-year biology student at Gazi University learning bioinformatics. Feedback is welcome.
+
+**Let's Connect:**
+- **Email:** [alperen57korkmaz@gmail.com]
+- **LinkedIn:** [https://www.linkedin.com/in/alperen-korkmaz-ba4b32322/]
+- **Rendered report:** [https://alperen-korkmaz-57.github.io/A-GEO-dataset-analysis/]

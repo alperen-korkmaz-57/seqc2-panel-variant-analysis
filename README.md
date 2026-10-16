@@ -19,7 +19,7 @@ I used a public reference sample on purpose. Patient sequencing data cannot be s
 
 ## Pipeline
 
-All steps are in [`scripts/pipeline.sh`](scripts/pipeline.sh). Each step is skipped if its output already exists.
+All steps are in [`scripts/variant_call_pipeline.sh`](scripts/variant_call_pipeline.sh). Each step is skipped if its output already exists.
 
 | Step | Tool | Purpose |
 |---|---|---|

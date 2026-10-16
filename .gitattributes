@@ -1,0 +1,4 @@
+# Language statistics on GitHub
+docs/**    linguist-documentation
+results/** linguist-generated
+*.qmd      linguist-language=R

@@ -1,0 +1,436 @@
+---
+title: "Targeted panel variant analysis: SEQC2 Sample B"
+subtitle: "Burning Rock OncoScreen Plus (520 genes), library SampleB_BRP1_ST28_LIB3"
+author: "Alperen Korkmaz"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+editor:
+  markdown:
+    wrap: 72
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(tidyverse)
+library(jsonlite)
+library(knitr)
+library(DT)
+
+# The report lives in report/, results are one level up.
+res_dir <- "../results"
+sample  <- "SampleB_BRP1_ST28_LIB3"
+
+# Build a path inside results/: res("coverage", "file.txt")
+res <- function(...) file.path(res_dir, ...)
+```
+
+## Overview
+
+This report summarises a variant-calling analysis of a public SEQC2
+reference sample (Sample B, a normal male cell line) sequenced with the
+Burning Rock OncoScreen Plus panel. Reads were trimmed (fastp), aligned
+to hg19 (bwa mem), duplicate-marked (samtools), checked for coverage
+(mosdepth), and variants were called, normalised and filtered with
+bcftools, then annotated with SnpEff. The full pipeline is in
+`scripts/variant_call_pipeline.sh`.
+
+## 1. Sequencing and alignment QC
+
+```{r}
+#| label: qc-read
+
+# --- fastp: read counts before/after trimming --------------------------------
+# fastp counts R1 and R2 separately, so read pairs = reads / 2
+fastp <- fromJSON(res("fastp", paste0(sample, "_fastp.json")))
+raw_pairs   <- fastp$summary$before_filtering$total_reads / 2
+clean_pairs <- fastp$summary$after_filtering$total_reads / 2
+
+# --- samtools flagstat: alignment numbers ------------------------------------
+# Each line starts with a count, e.g. "77781850 + 0 primary mapped (99.96% : N/A)".
+# flag_count() returns the count on the first line that matches a pattern.
+flagstat <- readLines(res("alignment", paste0(sample, ".flagstat.txt")))
+flag_count <- function(pattern) {
+  line <- flagstat[str_detect(flagstat, pattern)][1]
+  as.numeric(str_extract(line, "^\\d+"))
+}
+primary         <- flag_count(" primary$")
+primary_mapped  <- flag_count(" primary mapped \\(")
+properly_paired <- flag_count(" properly paired \\(")
+primary_dups    <- flag_count(" primary duplicates$")
+
+# --- samtools markdup: estimated library size --------------------------------
+# Lines look like "ESTIMATED_LIBRARY_SIZE: 19244688"
+markdup <- readLines(res("alignment", paste0(sample, ".markdup_stats.txt")))
+library_size <- markdup |>
+  str_subset("^ESTIMATED_LIBRARY_SIZE:") |>
+  str_extract("\\d+$") |>
+  as.numeric()
+
+# --- mosdepth: mean depth over the target regions ----------------------------
+cov_summary <- read_tsv(res("coverage", paste0(sample, ".mosdepth.summary.txt")))
+mean_target_depth <- cov_summary |>
+  filter(chrom == "total_region") |>
+  pull(mean)
+
+# --- on-target rate (computed in the pipeline with samtools view -L) ---------
+on_target <- read_tsv(res("coverage", paste0(sample, ".on_target.tsv")))
+on_target_rate <- on_target$on_target_reads / on_target$total_reads
+
+# --- mosdepth thresholds: fraction of target bases at each depth -------------
+# Columns: #chrom, start, end, region, then one column per threshold
+thresholds <- read_tsv(res("coverage", paste0(sample, ".thresholds.bed.gz")))
+target_bp  <- sum(thresholds$end - thresholds$start)
+pct_100x   <- sum(thresholds$`100X`)  / target_bp
+pct_500x   <- sum(thresholds$`500X`)  / target_bp
+```
+
+```{r}
+#| label: qc-table
+
+pct   <- function(x) scales::percent(x, accuracy = 0.01)
+fmt_n <- function(x) scales::comma(x)
+
+qc <- tribble(
+  ~Metric,                                     ~Value,
+  "Raw read pairs",                            fmt_n(raw_pairs),
+  "Read pairs after trimming (fastp)",         paste0(fmt_n(clean_pairs), " (", pct(clean_pairs / raw_pairs), ")"),
+  "Mapped (primary reads)",                    pct(primary_mapped / primary),
+  "Properly paired",                           pct(properly_paired / primary),
+  "Duplicate rate",                            pct(primary_dups / primary),
+  "Estimated library size (unique fragments)", fmt_n(library_size),
+  "On-target rate (unique reads)",             pct(on_target_rate),
+  "Mean depth over targets",                   paste0(round(mean_target_depth), "x"),
+  "Target bases at ≥100x",                     pct(pct_100x),
+  "Target bases at ≥500x",                     pct(pct_500x)
+)
+
+kable(qc, caption = "Sequencing, alignment and coverage summary")
+```
+
+The library was sequenced to roughly twice its estimated size
+(`r fmt_n(clean_pairs)` read pairs for about `r fmt_n(library_size)`
+unique fragments), which explains the high duplicate rate: further
+sequencing would have added little new information. After removing
+duplicates and reads with mapping quality below 20, the targets were
+still covered at a mean depth of `r round(mean_target_depth)`x.
+
+## 2. Coverage
+
+```{r}
+#| label: coverage
+
+regions <- read_tsv(res("coverage", paste0(sample, ".regions.bed.gz")),
+                    col_names = c("chrom", "start", "end", "gene", "depth")) |>
+  mutate(length = end - start)
+
+gene_cov <- regions |>
+  group_by(gene) |>
+  summarise(
+    n_regions  = n(),
+    length_bp  = sum(length),
+    mean_depth = sum(depth * length) / sum(length)
+  ) |>
+  arrange(mean_depth)
+
+kable(head(gene_cov, 10), digits = 0,
+      caption = "The 10 genes with the lowest mean depth")
+```
+
+The mean depth of each gene is a length-weighted average over its target
+regions, so long regions count more than short ones. Two genes, CRLF2
+and HIST2H3C, have no usable coverage; the reason is explained below the
+low-coverage table.
+
+```{r}
+#| label: coverage-plot
+
+ggplot(regions, aes(x = depth)) +
+  geom_histogram(bins = 50) +
+  scale_x_log10() +
+  geom_vline(xintercept = 100, linetype = "dashed") +
+  labs(x = "Mean depth per region (x, log10 scale)",
+       y = "Number of target regions",
+       title = "Mean depth per target region")
+```
+
+The median depth of a target region is
+`r fmt_n(round(median(regions$depth)))`x. The dashed line marks 100x.
+Regions with a depth of 0x cannot be drawn on a logarithmic axis
+(log10(0) is undefined), so they are missing from this histogram; they
+are listed in the table below.
+
+```{r}
+#| label: low-coverage
+
+low_cov <- regions |>
+  filter(depth < 100) |>
+  arrange(depth)
+
+kable(low_cov, digits = 0, caption = "Target regions with mean depth below 100x")
+```
+
+`r nrow(low_cov)` of `r fmt_n(nrow(regions))` target regions have a mean
+depth below 100x. The regions of CRLF2 and HIST2H3C are at 0x even
+though reads are present. CRLF2 lies in the pseudoautosomal region PAR1,
+whose sequence is identical on chrX and chrY. Reads from this region
+align equally well to both chromosomes and therefore receive a mapping
+quality (MAPQ) of 0. HIST2H3C belongs to a family of near-identical
+histone genes, with the same effect. Because reads with MAPQ below 20
+were excluded, these regions appear empty: in one CRLF2 region, 4,032
+unique reads were present without the MAPQ filter and none with it.
+Variants in these two genes cannot be called with this pipeline. The
+other low-coverage regions still reach at least
+`r round(min(low_cov$depth[!low_cov$gene %in% c("CRLF2", "HIST2H3C")]))`x,
+which is enough for germline calling.
+
+## 3. Variant calling and filtering
+
+```{r}
+#| label: filter-funnel
+
+# Return the number at the end of the first line matching a pattern,
+# e.g. "SN  0  number of records:  1283" -> 1283
+stats_value <- function(lines, pattern) {
+  line <- lines[str_detect(lines, pattern)][1]
+  as.numeric(str_extract(line, "\\d+$"))
+}
+
+# Read one bcftools stats file and return one table row
+read_stats <- function(stage) {
+  lines <- readLines(res("variants", paste0(sample, ".", stage, ".stats.txt")))
+
+  # TSTV line split into columns: 1 = "TSTV", 2 = id, 3 = ts, 4 = tv, 5 = ts/tv
+  tstv <- str_split(str_subset(lines, "^TSTV"), "\t")[[1]]
+
+  tibble(
+    stage   = stage,
+    records = stats_value(lines, "number of records:"),
+    snps    = stats_value(lines, "number of SNPs:"),
+    indels  = stats_value(lines, "number of indels:"),
+    ts_tv   = as.numeric(tstv[5])
+  )
+}
+
+stages <- c("raw", "normalized", "filtered", "pass")
+funnel <- map(stages, read_stats) |> list_rbind()
+
+kable(funnel, digits = 2, caption = "Variant counts at each pipeline stage")
+```
+
+- **raw → normalized:** normalisation split
+  `r funnel$records[2] - funnel$records[1]` multi-allelic sites into one
+  record per alternative allele. All of them were indels, so only the
+  indel count increases.
+- **normalized = filtered:** the filter is a soft filter. Variants that
+  fail are labelled `LowQual` in the FILTER column but are not removed.
+  The `pass` row counts only variants that passed.
+- **filtered → pass:** a variant was labelled `LowQual` if QUAL \< 30,
+  read depth \< 20 or variant allele frequency (VAF) \< 0.2.
+  `r funnel$records[3] - funnel$records[4]` variants failed, of which
+  `r funnel$indels[3] - funnel$indels[4]` were indels. The VAF criterion
+  alone caught 89 of them.
+- **Ti/Tv:** the transition/transversion ratio rose slightly from
+  `r sprintf("%.2f", funnel$ts_tv[3])` to
+  `r sprintf("%.2f", funnel$ts_tv[4])`. Real human variants give a ratio
+  of about 2–3 and random errors about 0.5, so this is consistent with
+  the removed calls being mostly errors.
+
+**Note on indel calling.** By default, `bcftools mpileup` looks at no
+more than 250 reads per position when calling indels. At a depth of
+about 1,500x this silently skipped almost all indels: the first run
+reported only 2. Raising the limit (`-L 10000`) gave 150 indels, with no
+change in the SNV calls.
+
+## 4. Variant characteristics
+
+```{r}
+#| label: variant-read
+
+variants <- read_tsv(
+  res("variants", paste0(sample, ".variants.tsv")),
+  col_names = c("chrom", "pos", "ref", "alt", "filter", "qual",
+                "gt", "dp", "vaf", "ann")
+)
+
+variants <- variants |>
+  mutate(
+    # ANN can hold several annotations separated by ","; SnpEff sorts them
+    # by severity, so the first one is the most damaging.
+    first_ann = str_extract(ann, "^[^,]+"),
+    effect    = str_split_i(first_ann, "\\|", 2),
+    impact    = str_split_i(first_ann, "\\|", 3),
+    gene      = str_split_i(first_ann, "\\|", 4),
+    protein   = str_split_i(first_ann, "\\|", 11),
+    type      = if_else(nchar(ref) == 1 & nchar(alt) == 1, "SNP", "indel"),
+    zygosity  = if_else(gt == "1/1", "hom", "het")
+  ) |>
+  select(-ann, -first_ann)
+```
+
+```{r}
+#| label: variant-context
+
+# Reference sequence around each variant (10 bp before, 20 bp after)
+context <- read_tsv(
+  res("variants", paste0(sample, ".context.tsv")),
+  col_names = c("region", "context")
+) |>
+  mutate(
+    chrom   = str_extract(region, "chr[^:]+"),
+    pos     = as.numeric(str_extract(region, "(?<=:)\\d+")) + 10,
+    context = toupper(context)
+  ) |>
+  distinct(chrom, pos, context)
+
+# Homopolymer (8+ identical bases) or dinucleotide repeat (5+ copies)
+repeat_pattern <- "A{8,}|C{8,}|G{8,}|T{8,}|([ACGT]{2})\\1{4,}"
+
+variants <- variants |>
+  left_join(context, by = c("chrom", "pos")) |>
+  mutate(in_repeat = str_detect(context, repeat_pattern))
+```
+
+```{r}
+#| label: pass-variants
+
+pass <- variants |> filter(filter == "PASS")
+```
+
+```{r}
+#| label: vaf-plot
+#| fig-height: 6
+
+ggplot(variants, aes(x = vaf, fill = filter)) +
+  geom_histogram(bins = 50) +
+  geom_vline(xintercept = 0.2, linetype = "dashed") +
+  facet_wrap(~ type, ncol = 1, scales = "free_y") +
+  labs(x = "Variant allele frequency (VAF)", y = "Number of variants",
+       fill = "FILTER", title = "VAF distribution of called variants")
+```
+
+For a germline sample, VAF is expected near 0.5 for heterozygous
+variants (one of two copies) and near 1.0 for homozygous variants (both
+copies). The SNVs follow this pattern. Calls labelled `LowQual` lie
+mostly below the VAF threshold of 0.2 (dashed line), and most of them
+are indels.
+
+```{r}
+#| label: zygosity
+
+pass |>
+  dplyr::count(type, zygosity) |>
+  pivot_wider(names_from = zygosity, values_from = n) |>
+  mutate(het_hom_ratio = het / hom) |>
+  kable(digits = 2, caption = "Zygosity of PASS variants")
+```
+
+The heterozygous-to-homozygous ratio of PASS SNVs is a plausible value
+for a human germline sample.
+
+```{r}
+#| label: indel-size
+
+pass |>
+  filter(type == "indel") |>
+  mutate(indel_length = nchar(alt) - nchar(ref)) |>
+  ggplot(aes(x = indel_length, fill = in_repeat)) +
+  geom_bar() +
+  labs(x = "Indel length (bp; negative = deletion, positive = insertion)",
+       y = "Number of PASS indels", fill = "In repeat",
+       title = "Size of PASS indels")
+
+variants |>
+  dplyr::count(filter, type, in_repeat) |>
+  kable(caption = "Variants in homopolymer / dinucleotide repeats, by filter status")
+```
+
+Most PASS indels are only one or two bases long. To see where they
+occur, the reference sequence around each variant (10 bp before to 20 bp
+after) was checked for a homopolymer of at least 8 identical bases or a
+dinucleotide repeat of at least 5 copies.
+`r scales::percent(mean(variants$in_repeat[variants$type == "indel"]), accuracy = 1)`
+of indels but only
+`r scales::percent(mean(variants$in_repeat[variants$type == "SNP"]), accuracy = 0.1)`
+of SNVs fall in such repeats.
+
+PCR and short-read sequencing are error-prone in repeats: the polymerase
+can "slip" and add or lose one repeat unit (stutter). During variant
+calling, several repeat sites showed three alleles at once, which is
+impossible for one diploid sample, and the extra alleles reached 10–30%
+VAF. A VAF threshold of 0.2 therefore cannot remove all of them. At the
+same time, repeats are genuinely highly variable between people. A
+variant in a repeat is therefore less reliable, not necessarily false.
+
+## 5. Annotated variants
+
+All PASS variants are listed below, sorted by predicted impact (HIGH,
+MODERATE, LOW, MODIFIER). The boxes above the columns can be used to
+search, for example for a gene name.
+
+```{r}
+#| label: variant-table
+
+impact_levels <- c("HIGH", "MODERATE", "LOW", "MODIFIER")
+
+pass |>
+  mutate(impact = factor(impact, levels = impact_levels)) |>
+  arrange(impact, chrom, pos) |>
+  select(gene, chrom, pos, ref, alt, effect, impact, protein,
+         dp, vaf, zygosity, in_repeat) |>
+  datatable(filter = "top", rownames = FALSE,
+            options = list(pageLength = 15, scrollX = TRUE)) |>
+  formatRound("vaf", 2)
+```
+
+Impact categories are SnpEff predictions. For each variant the first
+annotation is shown, which is the most severe one across all transcripts
+and may not refer to the main (canonical) transcript.
+
+The `r sum(pass$impact == "HIGH")` HIGH-impact calls need particular
+caution:
+
+- one (ATM) is a single-base insertion in a homopolymer at a splice
+  acceptor site, with a VAF of 0.35;
+- one (KMT2C) has a VAF of 0.28, which is unusual for a germline
+  variant;
+- three (PRKDC, MAP3K14, VEGFC) appear homozygous. Loss of both copies
+  of these genes is not expected in a healthy cell line; for example,
+  biallelic loss of PRKDC causes severe combined immunodeficiency.
+  Possible explanations are positions where the hg19 reference itself
+  carries a rare allele, or effects that are severe only in a minor
+  transcript.
+
+None of these calls was validated, so they should not be read as
+damaging variants.
+
+## 6. Limitations
+
+- **Germline calling only.** bcftools assumes a diploid sample, and
+  variants with VAF \< 0.2 are filtered out. The pipeline is not
+  suitable for low-frequency (somatic or mosaic) variants.
+- **Regions that cannot be called.** CRLF2 (PAR1) and HIST2H3C have no
+  reads with MAPQ ≥ 20. Masking the PAR region of chrY in the reference
+  would recover CRLF2.
+- **Indels in repeats.** Indels in homopolymers and short tandem repeats
+  are unreliable with 150 bp reads. The repeat flag used here is simple:
+  its window size and thresholds were chosen by hand, and it does not
+  detect repeats with units longer than two bases.
+- **QUAL and depth filters.** At about 1,500x, QUAL values saturate
+  (most calls fall between 220 and 228), and the depth threshold of 20
+  almost never applies. In practice the VAF threshold did most of the
+  filtering.
+- **Annotation.** Only the most severe SnpEff annotation is reported,
+  and HIGH-impact calls were not checked against population databases
+  such as gnomAD.
+- **No truth-set comparison.** The calls were not compared with the
+  SEQC2 reference call set, so precision and sensitivity are unknown.
+  This is the most important next step.
+- **One library.** Only one of the four technical replicates (LIB3) was
+  analysed.

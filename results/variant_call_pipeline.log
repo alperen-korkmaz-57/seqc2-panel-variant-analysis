@@ -1,0 +1,27 @@
+variant analysis pipeline starting...
+checking required tools...
+ - fastqc: found
+ - fastp: found
+ - bwa: found
+ - samtools: found
+ - bcftools: found
+ - mosdepth: found
+ - snpEff: found
+All required tools found.
+All input files found.
+starting quality control of raw reads...
+fastQC reports already exist, skipping.
+starting read trimming...
+trimmed reads already exist, skipping.
+starting alignment...
+Sorted BAM already exists, skipping.
+Starting duplicate marking...
+Duplicate-marked BAM already exists, skipping.
+Starting coverage analysis...
+Coverage results already exist, skipping.
+Starting variant calling...
+Note: none of --samples-file, --ploidy or --ploidy-file given, assuming all sites are diploid
+[mpileup] 1 samples in 1 input files
+[mpileup] maximum number of reads per input file set to -d 10000
+[W::bcf_hdr_check_sanity] MQ should be declared as Type=Float
+Variant calling finished: results/variants/SampleB_BRP1_ST28_LIB3.raw.vcf.gz

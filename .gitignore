@@ -1,0 +1,24 @@
+# --- Input data (downloaded separately, see README) -------------------
+data/
+ref/
+regions/
+
+# --- Large intermediate files ------------------------------------------
+*.fastq.gz
+*.fq.gz
+*.fastq
+*.sam
+*.bam
+*.bai
+*.cram
+
+# --- R / RStudio / Quarto -----------------------------------------------
+.Rproj.user/
+.Rhistory
+.RData
+.quarto/
+report/*_files/
+report/*.html
+
+# --- Windows leftovers --------------------------------------------------
+*Zone.Identifier

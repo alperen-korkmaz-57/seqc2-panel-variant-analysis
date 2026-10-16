@@ -54,7 +54,16 @@ The report ([`report/report.qmd`](report/report.qmd)) reads the pipeline outputs
 1. **Default settings can fail silently.** At about 1,500x, `bcftools mpileup` with default settings called only 2 indels, because it looks at no more than 250 reads per position when calling indels. Raising the limit (`-L 10000`) gave 150 indels, with no change in the SNV calls. I found the problem only because the indel fraction was biologically implausible.
 2. **"No reads" and "reads with no confident position" are different.** CRLF2 showed 0x coverage. It lies in PAR1, a region identical on chrX and chrY, so its reads receive mapping quality 0 and are removed by the MAPQ ≥ 20 filter. Without the filter, one CRLF2 region had 4,032 reads.
 3. **Short reads struggle in repeats.** 69% of indels, but only 1.6% of SNVs, lie in homopolymers or dinucleotide repeats. Several of these sites showed three alleles at once. Most of the seven HIGH-impact calls also looked doubtful on closer inspection. I report them as limitations, not as findings.
+<p align="center">
+  <img src="docs/indel_size_repeats.png" width="650" alt="Size of PASS indels, coloured by whether they lie in a repeat">
+</p>
+## VAF distribution
 
+For a germline sample, variant allele frequency (VAF) should be near 0.5 (heterozygous) or 1.0 (homozygous). SNVs follow this pattern; most calls removed by the filter (`LowQual`) are low-VAF indels below the 0.2 threshold (dashed line).
+
+<p align="center">
+  <img src="docs/vaf_distribution.png" width="650" alt="VAF distribution of SNVs and indels, coloured by filter status">
+</p>
 ## Limitations
 
 Germline calling only; CRLF2 and HIST2H3C cannot be called; indels in repeats are unreliable; only one library was analysed; no comparison with the SEQC2 truth set yet. See section 6 of the report for details.
